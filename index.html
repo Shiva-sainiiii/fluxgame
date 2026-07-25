@@ -79,6 +79,13 @@
     text-align: center; width: 320px;
   }
 
+  #objective {
+    position: absolute; top: 64px; left: 28px;
+    font-size: 11px; color: #ffb347; letter-spacing: 0.1em; text-transform: uppercase;
+    max-width: 260px; line-height: 1.6;
+    opacity: 0.85;
+  }
+
   #reset-btn {
     position: absolute; bottom: 36px; right: 28px;
     pointer-events: auto;
@@ -114,6 +121,7 @@
     <span class="val" id="axis-val">−Y</span>
   </div>
   <div id="hint">click a face to redirect gravity</div>
+  <div id="objective">push a crate onto the amber plate to open the door</div>
   <div id="gravity-pad">
     <div class="g-btn empty"></div>
     <div class="g-btn" data-axis="0,1,0">+Y</div>
@@ -347,6 +355,188 @@ window.addEventListener('cannon-ready', function () {
   scene.add(playerGlow);
 
   // ============================================================
+  // PUZZLE ELEMENTS — crates, pressure plates, door, hazard
+  // ============================================================
+  const CRATE_SIZE = 1.1;
+  const crates = []; // { body, mesh }
+
+  function spawnCrate(x, y, z) {
+    const shape = new CANNON.Box(new CANNON.Vec3(CRATE_SIZE/2, CRATE_SIZE/2, CRATE_SIZE/2));
+    const body = new CANNON.Body({
+      mass: 2.2,
+      material: defaultMaterial,
+      linearDamping: 0.25,
+      angularDamping: 0.5
+    });
+    body.addShape(shape);
+    body.position.set(x, y, z);
+    world.addBody(body);
+
+    const geo = new THREE.BoxGeometry(CRATE_SIZE, CRATE_SIZE, CRATE_SIZE);
+    const mat = new THREE.MeshStandardMaterial({
+      color: 0xb08a5a,
+      roughness: 0.7,
+      metalness: 0.15,
+      emissive: 0x2a1a08,
+      emissiveIntensity: 0.15
+    });
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    scene.add(mesh);
+
+    const wire = new THREE.LineSegments(
+      new THREE.EdgesGeometry(geo),
+      new THREE.LineBasicMaterial({ color: 0xffdca8, transparent: true, opacity: 0.35 })
+    );
+    mesh.add(wire);
+
+    const entry = { body, mesh };
+    crates.push(entry);
+    return entry;
+  }
+
+  // Two crates for the test level
+  spawnCrate(3, 3, -3);
+  spawnCrate(-2.5, 3, 2);
+
+  // ---- Pressure plate ----
+  const PLATE_TRIGGER_MASS = 1.5; // min combined mass-ish weight to trigger (we just check "something is resting on it")
+  const plates = []; // { mesh, body(sensorless — we use proximity), pos, isPressed, doorRef }
+
+  function spawnPlate(x, y, z, color, doorRef) {
+    const geo = new THREE.CylinderGeometry(0.85, 0.85, 0.15, 24);
+    const mat = new THREE.MeshStandardMaterial({
+      color: 0x2a2d38,
+      emissive: color,
+      emissiveIntensity: 0.35,
+      roughness: 0.5,
+      metalness: 0.3
+    });
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.position.set(x, y, z);
+    mesh.receiveShadow = true;
+    scene.add(mesh);
+
+    const plateLight = new THREE.PointLight(color, 0, 4);
+    plateLight.position.set(x, y + 0.3, z);
+    scene.add(plateLight);
+
+    const plate = { mesh, light: plateLight, pos: new THREE.Vector3(x, y, z), pressed: false, color, doorRef };
+    plates.push(plate);
+    return plate;
+  }
+
+  // ---- Door (blocks a passage until its plate is pressed) ----
+  const doors = []; // { body, mesh, openPos, closedPos, isOpen }
+
+  function spawnDoor(x, y, z, openOffset) {
+    const geo = new THREE.BoxGeometry(2.2, 3, 0.3);
+    const mat = new THREE.MeshStandardMaterial({
+      color: 0x2f3340,
+      emissive: 0x14161f,
+      roughness: 0.6,
+      metalness: 0.4
+    });
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.position.set(x, y, z);
+    mesh.castShadow = true;
+    scene.add(mesh);
+
+    const body = new CANNON.Body({ mass: 0, material: defaultMaterial });
+    body.addShape(new CANNON.Box(new CANNON.Vec3(1.1, 1.5, 0.15)));
+    body.position.set(x, y, z);
+    world.addBody(body);
+
+    const door = {
+      body, mesh,
+      closedPos: new THREE.Vector3(x, y, z),
+      openPos: new THREE.Vector3(x + openOffset[0], y + openOffset[1], z + openOffset[2]),
+      isOpen: false
+    };
+    doors.push(door);
+    return door;
+  }
+
+  const testDoor = spawnDoor(0, -half + 1.5, half - 0.15, [0, 3.2, 0]); // slides up into ceiling when open
+  const testPlate = spawnPlate(3, -half + 0.1, -3, 0xffb347, testDoor);
+
+  // ---- Hazard zone (visual danger strip on the floor — touching resets player) ----
+  const hazards = []; // { mesh, pos, radius }
+
+  function spawnHazard(x, y, z, radius) {
+    const geo = new THREE.RingGeometry(radius * 0.6, radius, 32);
+    const mat = new THREE.MeshBasicMaterial({
+      color: 0xff3b3b,
+      transparent: true,
+      opacity: 0.55,
+      side: THREE.DoubleSide
+    });
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.position.set(x, y + 0.03, z);
+    mesh.rotation.x = -Math.PI / 2;
+    scene.add(mesh);
+
+    const glow = new THREE.PointLight(0xff3b3b, 0.6, 5);
+    glow.position.set(x, y + 0.5, z);
+    scene.add(glow);
+
+    hazards.push({ mesh, pos: new THREE.Vector3(x, y, z), radius, glow });
+  }
+
+  spawnHazard(-3, -half + 0.05, -3, 1.6);
+
+  function updatePuzzleElements(dt) {
+    // --- Pressure plates: check if player or any crate is near/above plate ---
+    plates.forEach(plate => {
+      let pressed = false;
+      const checkBody = (pos, threshold) => {
+        const dx = pos.x - plate.pos.x;
+        const dy = pos.y - plate.pos.y;
+        const dz = pos.z - plate.pos.z;
+        const distSq = dx*dx + dy*dy + dz*dz;
+        if (distSq < threshold * threshold) pressed = true;
+      };
+      checkBody(playerBody.position, 1.1);
+      crates.forEach(c => checkBody(c.body.position, 1.15));
+
+      if (pressed !== plate.pressed) {
+        plate.pressed = pressed;
+        plate.mesh.position.y = plate.pos.y - (pressed ? 0.06 : 0);
+        plate.light.intensity = pressed ? 1.4 : 0;
+        if (plate.doorRef) {
+          plate.doorRef.isOpen = pressed;
+        }
+      }
+    });
+
+    // --- Doors: lerp toward open/closed position ---
+    doors.forEach(door => {
+      const target = door.isOpen ? door.openPos : door.closedPos;
+      door.mesh.position.lerp(target, Math.min(1, dt * 4));
+      door.body.position.set(door.mesh.position.x, door.mesh.position.y, door.mesh.position.z);
+    });
+
+    // --- Hazards: reset player if close enough (works on whichever face is "floor" since hazard is placed on -y face for now) ---
+    hazards.forEach(h => {
+      const dx = playerBody.position.x - h.pos.x;
+      const dy = playerBody.position.y - h.pos.y;
+      const dz = playerBody.position.z - h.pos.z;
+      const distSq = dx*dx + dy*dy + dz*dz;
+      if (distSq < h.radius * h.radius * 0.5) {
+        respawnPlayer();
+      }
+    });
+  }
+
+  function respawnPlayer() {
+    playerBody.position.set(0, 3, 0);
+    playerBody.velocity.set(0, 0, 0);
+    playerBody.angularVelocity.set(0, 0, 0);
+    playerBody.quaternion.set(0, 0, 0, 1);
+  }
+
+  // ============================================================
   // GRAVITY DIRECTION LOGIC
   // ============================================================
   function axisKeyFromVec(v) {
@@ -477,12 +667,23 @@ window.addEventListener('cannon-ready', function () {
   // ============================================================
   // RESET
   // ============================================================
+  const crateStartPositions = crates.map(c => c.body.position.clone());
+
   document.getElementById('reset-btn').addEventListener('click', () => {
     playerBody.position.set(0, 3, 0);
     playerBody.velocity.set(0, 0, 0);
     playerBody.angularVelocity.set(0, 0, 0);
     playerBody.quaternion.set(0, 0, 0, 1);
     setGravity(0, -1, 0);
+
+    crates.forEach((c, i) => {
+      c.body.position.copy(crateStartPositions[i]);
+      c.body.velocity.set(0, 0, 0);
+      c.body.angularVelocity.set(0, 0, 0);
+      c.body.quaternion.set(0, 0, 0, 1);
+    });
+    doors.forEach(d => { d.isOpen = false; });
+    plates.forEach(p => { p.pressed = false; p.light.intensity = 0; });
   });
 
   // Fall-out-of-room safety net: if player somehow escapes bounds, recenter
@@ -519,10 +720,16 @@ window.addEventListener('cannon-ready', function () {
     applyMovement();
     world.step(FIXED_STEP, dt, 5);
     safetyCheck();
+    updatePuzzleElements(dt);
 
     playerMesh.position.copy(playerBody.position);
     playerMesh.quaternion.copy(playerBody.quaternion);
     playerGlow.position.copy(playerBody.position);
+
+    crates.forEach(c => {
+      c.mesh.position.copy(c.body.position);
+      c.mesh.quaternion.copy(c.body.quaternion);
+    });
 
     renderer.render(scene, camera);
   }
