@@ -145,7 +145,9 @@
   // then bridge it onto window so the rest of the game code (plain script) can use it.
   import * as CANNON from 'https://unpkg.com/cannon-es@0.20.0/dist/cannon-es.js';
   window.CANNON = CANNON;
-  window.dispatchEvent(new Event('cannon-ready'));
+</script>
+<script>
+window.__cannonReadyFired = false;
 </script>
 <script>
 // ---------- Fallback loader check ----------
@@ -154,11 +156,25 @@ window.addEventListener('load', () => {
     if (typeof THREE === 'undefined' || typeof window.CANNON === 'undefined') {
       document.body.innerHTML = '<div style="color:#fff;font-family:monospace;padding:40px;">Failed to load Three.js / cannon-es from CDN. Check your connection and reload.</div>';
     }
-  }, 800);
+  }, 4000);
 });
 </script>
 <script>
-window.addEventListener('cannon-ready', function () {
+function __startGameWhenReady(startFn) {
+  // Poll instead of relying purely on event timing — module scripts can
+  // finish before this listener is attached, which drops the event silently.
+  if (typeof window.CANNON !== 'undefined') {
+    startFn();
+    return;
+  }
+  const check = setInterval(() => {
+    if (typeof window.CANNON !== 'undefined') {
+      clearInterval(check);
+      startFn();
+    }
+  }, 30);
+}
+__startGameWhenReady(function () {
 (function () {
   'use strict';
 
@@ -738,7 +754,7 @@ window.addEventListener('cannon-ready', function () {
   animate();
 
 })();
-}); // end cannon-ready listener
+}); // end __startGameWhenReady
 </script>
 </body>
 </html>
