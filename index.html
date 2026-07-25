@@ -1,0 +1,537 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Flux — Gravity Puzzle Prototype</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #05060a; }
+  #canvas-wrap { position: fixed; inset: 0; }
+  canvas { display: block; }
+
+  #hud {
+    position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+    pointer-events: none;
+    font-family: 'Courier New', monospace;
+    color: #e8e8f0;
+  }
+
+  #title {
+    position: absolute; top: 24px; left: 28px;
+    letter-spacing: 0.35em;
+    font-size: 13px;
+    color: #6b7280;
+    text-transform: uppercase;
+  }
+  #title span { color: var(--accent, #4fd1e8); }
+
+  #axis-readout {
+    position: absolute; top: 24px; right: 28px;
+    text-align: right;
+    font-size: 12px;
+    color: #6b7280;
+    letter-spacing: 0.1em;
+  }
+  #axis-readout .val {
+    font-size: 20px;
+    color: var(--accent, #4fd1e8);
+    display: block;
+    margin-top: 2px;
+    transition: color 0.3s ease;
+  }
+
+  #gravity-pad {
+    position: absolute;
+    bottom: 36px; left: 50%; transform: translateX(-50%);
+    display: grid;
+    grid-template-columns: repeat(3, 56px);
+    grid-template-rows: repeat(3, 56px);
+    gap: 6px;
+    pointer-events: auto;
+  }
+  .g-btn {
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 8px;
+    color: #cfd2dc;
+    font-family: 'Courier New', monospace;
+    font-size: 11px;
+    letter-spacing: 0.05em;
+    cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    transition: all 0.15s ease;
+    user-select: none;
+  }
+  .g-btn:hover { background: rgba(255,255,255,0.1); border-color: rgba(255,255,255,0.3); }
+  .g-btn:active { transform: scale(0.92); }
+  .g-btn.active {
+    background: var(--accent, #4fd1e8);
+    color: #05060a;
+    border-color: var(--accent, #4fd1e8);
+    font-weight: bold;
+  }
+  .g-btn.empty { visibility: hidden; cursor: default; }
+
+  #hint {
+    position: absolute; bottom: 220px; left: 50%; transform: translateX(-50%);
+    font-size: 11px; color: #4b4f5a; letter-spacing: 0.15em; text-transform: uppercase;
+    text-align: center; width: 320px;
+  }
+
+  #reset-btn {
+    position: absolute; bottom: 36px; right: 28px;
+    pointer-events: auto;
+    background: transparent;
+    border: 1px solid rgba(255,255,255,0.2);
+    color: #9ca0ac;
+    font-family: 'Courier New', monospace;
+    font-size: 11px;
+    letter-spacing: 0.1em;
+    padding: 10px 16px;
+    border-radius: 6px;
+    cursor: pointer;
+    text-transform: uppercase;
+    transition: all 0.15s ease;
+  }
+  #reset-btn:hover { border-color: #e8e8f0; color: #e8e8f0; }
+
+  #camera-hint {
+    position: absolute; bottom: 36px; left: 28px;
+    font-size: 10px; color: #3d4049; letter-spacing: 0.1em; line-height: 1.8;
+    text-transform: uppercase;
+  }
+</style>
+</head>
+<body>
+
+<div id="canvas-wrap"></div>
+
+<div id="hud">
+  <div id="title">FLUX <span>/ gravity sandbox</span></div>
+  <div id="axis-readout">
+    DOWN VECTOR
+    <span class="val" id="axis-val">−Y</span>
+  </div>
+  <div id="hint">click a face to redirect gravity</div>
+  <div id="gravity-pad">
+    <div class="g-btn empty"></div>
+    <div class="g-btn" data-axis="0,1,0">+Y</div>
+    <div class="g-btn empty"></div>
+
+    <div class="g-btn" data-axis="-1,0,0">−X</div>
+    <div class="g-btn empty" style="visibility:hidden"></div>
+    <div class="g-btn" data-axis="1,0,0">+X</div>
+
+    <div class="g-btn empty"></div>
+    <div class="g-btn active" data-axis="0,-1,0">−Y</div>
+    <div class="g-btn empty"></div>
+  </div>
+  <div id="camera-hint">drag: orbit &nbsp;·&nbsp; scroll: zoom &nbsp;·&nbsp; WASD: move</div>
+  <button id="reset-btn">Reset</button>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script type="module">
+  // cannon-es ships ESM-only (no cdnjs UMD build) — import as a module,
+  // then bridge it onto window so the rest of the game code (plain script) can use it.
+  import * as CANNON from 'https://unpkg.com/cannon-es@0.20.0/dist/cannon-es.js';
+  window.CANNON = CANNON;
+  window.dispatchEvent(new Event('cannon-ready'));
+</script>
+<script>
+// ---------- Fallback loader check ----------
+window.addEventListener('load', () => {
+  setTimeout(() => {
+    if (typeof THREE === 'undefined' || typeof window.CANNON === 'undefined') {
+      document.body.innerHTML = '<div style="color:#fff;font-family:monospace;padding:40px;">Failed to load Three.js / cannon-es from CDN. Check your connection and reload.</div>';
+    }
+  }, 800);
+});
+</script>
+<script>
+window.addEventListener('cannon-ready', function () {
+(function () {
+  'use strict';
+
+  // ============================================================
+  // CONSTANTS
+  // ============================================================
+  const ROOM_SIZE = 14;          // hollow cube room half-extent *2
+  const GRAVITY_MAG = 18;
+  const PLAYER_SIZE = 0.9;
+  const AXIS_COLORS = {
+    'x': 0xff6b5b,   // coral
+    'y': 0x4fd1e8,   // cyan
+    'z': 0x9b7bf0    // violet
+  };
+
+  let currentGravityDir = new (window.CANNON.Vec3)(0, -1, 0);
+
+  // ============================================================
+  // THREE.JS SCENE
+  // ============================================================
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x05060a);
+  scene.fog = new THREE.FogExp2(0x05060a, 0.028);
+
+  const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 200);
+  camera.position.set(16, 14, 16);
+
+  const renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  document.getElementById('canvas-wrap').appendChild(renderer.domElement);
+
+  // Lighting
+  const ambient = new THREE.AmbientLight(0x404060, 0.8);
+  scene.add(ambient);
+
+  const keyLight = new THREE.DirectionalLight(0xffffff, 0.9);
+  keyLight.position.set(10, 18, 8);
+  keyLight.castShadow = true;
+  keyLight.shadow.mapSize.set(2048, 2048);
+  keyLight.shadow.camera.left = -20;
+  keyLight.shadow.camera.right = 20;
+  keyLight.shadow.camera.top = 20;
+  keyLight.shadow.camera.bottom = -20;
+  keyLight.shadow.camera.far = 60;
+  scene.add(keyLight);
+
+  const accentLight = new THREE.PointLight(0x4fd1e8, 1.2, 30);
+  accentLight.position.set(0, 0, 0);
+  scene.add(accentLight);
+
+  // Grid floor helper only on the "down" face — rebuilt dynamically
+  let floorGrid = null;
+
+  // ============================================================
+  // ORBIT CAMERA (manual, dependency-free)
+  // ============================================================
+  const orbit = {
+    radius: 24,
+    theta: Math.PI / 4,   // horizontal angle
+    phi: Math.PI / 3.2,   // vertical angle
+    target: new THREE.Vector3(0, 0, 0),
+    isDragging: false,
+    lastX: 0, lastY: 0
+  };
+
+  function updateCameraFromOrbit() {
+    const sinPhi = Math.sin(orbit.phi);
+    const x = orbit.target.x + orbit.radius * sinPhi * Math.sin(orbit.theta);
+    const y = orbit.target.y + orbit.radius * Math.cos(orbit.phi);
+    const z = orbit.target.z + orbit.radius * sinPhi * Math.cos(orbit.theta);
+    camera.position.set(x, y, z);
+    camera.lookAt(orbit.target);
+  }
+  updateCameraFromOrbit();
+
+  const canvasEl = renderer.domElement;
+  canvasEl.addEventListener('pointerdown', (e) => {
+    orbit.isDragging = true;
+    orbit.lastX = e.clientX;
+    orbit.lastY = e.clientY;
+  });
+  window.addEventListener('pointerup', () => orbit.isDragging = false);
+  window.addEventListener('pointermove', (e) => {
+    if (!orbit.isDragging) return;
+    const dx = e.clientX - orbit.lastX;
+    const dy = e.clientY - orbit.lastY;
+    orbit.lastX = e.clientX;
+    orbit.lastY = e.clientY;
+    orbit.theta -= dx * 0.005;
+    orbit.phi -= dy * 0.005;
+    orbit.phi = Math.max(0.15, Math.min(Math.PI - 0.15, orbit.phi));
+    updateCameraFromOrbit();
+  });
+  canvasEl.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    orbit.radius += e.deltaY * 0.02;
+    orbit.radius = Math.max(8, Math.min(50, orbit.radius));
+    updateCameraFromOrbit();
+  }, { passive: false });
+
+  // ============================================================
+  // PHYSICS WORLD (cannon-es)
+  // ============================================================
+  const world = new CANNON.World({
+    gravity: new CANNON.Vec3(0, -GRAVITY_MAG, 0)
+  });
+  world.broadphase = new CANNON.SAPBroadphase(world);
+  world.allowSleep = false;
+  world.solver.iterations = 12;
+
+  const defaultMaterial = new CANNON.Material('default');
+  const contactMat = new CANNON.ContactMaterial(defaultMaterial, defaultMaterial, {
+    friction: 0.4,
+    restitution: 0.15
+  });
+  world.defaultContactMaterial = contactMat;
+
+  // ---- Room walls (6 static planes forming a hollow box) ----
+  const half = ROOM_SIZE / 2;
+  const wallDefs = [
+    { pos: [0, -half, 0], normal: [0, 1, 0], color: 0x14161f, name: 'floor(-y)' },
+    { pos: [0, half, 0], normal: [0, -1, 0], color: 0x14161f, name: 'ceil(+y)' },
+    { pos: [-half, 0, 0], normal: [1, 0, 0], color: 0x121017, name: 'wall(-x)' },
+    { pos: [half, 0, 0], normal: [-1, 0, 0], color: 0x121017, name: 'wall(+x)' },
+    { pos: [0, 0, -half], normal: [0, 0, 1], color: 0x111217, name: 'wall(-z)' },
+    { pos: [0, 0, half], normal: [0, 0, -1], color: 0x111217, name: 'wall(+z)' },
+  ];
+
+  const wallMeshes = [];
+  wallDefs.forEach(w => {
+    // physics
+    const body = new CANNON.Body({ mass: 0, material: defaultMaterial });
+    const shape = new CANNON.Plane();
+    body.addShape(shape);
+    body.position.set(w.pos[0], w.pos[1], w.pos[2]);
+    const n = new THREE.Vector3(...w.normal);
+    const quat = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), n);
+    body.quaternion.set(quat.x, quat.y, quat.z, quat.w);
+    world.addBody(body);
+
+    // visual (thin box instead of infinite plane, for realistic look)
+    const geo = new THREE.BoxGeometry(
+      w.normal[0] !== 0 ? 0.4 : ROOM_SIZE,
+      w.normal[1] !== 0 ? 0.4 : ROOM_SIZE,
+      w.normal[2] !== 0 ? 0.4 : ROOM_SIZE
+    );
+    const mat = new THREE.MeshStandardMaterial({
+      color: w.color,
+      roughness: 0.85,
+      metalness: 0.1
+    });
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.position.set(w.pos[0], w.pos[1], w.pos[2]);
+    mesh.receiveShadow = true;
+    mesh.userData.faceName = w.name;
+    scene.add(mesh);
+    wallMeshes.push(mesh);
+  });
+
+  // Edge wireframe for room (helps read geometry while orbiting)
+  const edgesGeo = new THREE.EdgesGeometry(new THREE.BoxGeometry(ROOM_SIZE, ROOM_SIZE, ROOM_SIZE));
+  const edgesMat = new THREE.LineBasicMaterial({ color: 0x2a2d38 });
+  const roomEdges = new THREE.LineSegments(edgesGeo, edgesMat);
+  scene.add(roomEdges);
+
+  // ---- Player ----
+  const playerShape = new CANNON.Box(new CANNON.Vec3(PLAYER_SIZE/2, PLAYER_SIZE/2, PLAYER_SIZE/2));
+  const playerBody = new CANNON.Body({
+    mass: 1,
+    material: defaultMaterial,
+    linearDamping: 0.3,
+    angularDamping: 0.6
+  });
+  playerBody.addShape(playerShape);
+  playerBody.position.set(0, 3, 0);
+  world.addBody(playerBody);
+
+  const playerGeo = new THREE.BoxGeometry(PLAYER_SIZE, PLAYER_SIZE, PLAYER_SIZE);
+  const playerMat = new THREE.MeshStandardMaterial({
+    color: 0x4fd1e8,
+    emissive: 0x1a5a66,
+    emissiveIntensity: 0.6,
+    roughness: 0.3,
+    metalness: 0.4
+  });
+  const playerMesh = new THREE.Mesh(playerGeo, playerMat);
+  playerMesh.castShadow = true;
+  scene.add(playerMesh);
+
+  const playerGlow = new THREE.PointLight(0x4fd1e8, 0.8, 6);
+  scene.add(playerGlow);
+
+  // ============================================================
+  // GRAVITY DIRECTION LOGIC
+  // ============================================================
+  function axisKeyFromVec(v) {
+    if (Math.abs(v.x) > 0.5) return 'x';
+    if (Math.abs(v.y) > 0.5) return 'y';
+    return 'z';
+  }
+
+  function setGravity(x, y, z) {
+    currentGravityDir.set(x, y, z);
+    world.gravity.set(x * GRAVITY_MAG, y * GRAVITY_MAG, z * GRAVITY_MAG);
+
+    const key = axisKeyFromVec(currentGravityDir);
+    const hexColor = AXIS_COLORS[key];
+    const cssColor = '#' + hexColor.toString(16).padStart(6, '0');
+
+    document.documentElement.style.setProperty('--accent', cssColor);
+    accentLight.color.setHex(hexColor);
+    playerMat.emissive.setHex(hexColor);
+    playerGlow.color.setHex(hexColor);
+
+    const axisLabel = (x !== 0 ? (x > 0 ? '+X' : '−X') : (y !== 0 ? (y > 0 ? '+Y' : '−Y') : (z > 0 ? '+Z' : '−Z')));
+    document.getElementById('axis-val').textContent = axisLabel;
+
+    document.querySelectorAll('.g-btn').forEach(btn => {
+      btn.classList.remove('active');
+      const a = btn.dataset.axis;
+      if (a) {
+        const [ax, ay, az] = a.split(',').map(Number);
+        if (ax === x && ay === y && az === z) btn.classList.add('active');
+      }
+    });
+  }
+
+  document.querySelectorAll('.g-btn[data-axis]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const [x, y, z] = btn.dataset.axis.split(',').map(Number);
+      setGravity(x, y, z);
+    });
+  });
+
+  // Click-on-wall-face to set gravity toward that face (raycast)
+  const raycaster = new THREE.Raycaster();
+  const pointer = new THREE.Vector2();
+  let pointerDownPos = null;
+
+  canvasEl.addEventListener('pointerdown', (e) => {
+    pointerDownPos = { x: e.clientX, y: e.clientY };
+  });
+
+  canvasEl.addEventListener('pointerup', (e) => {
+    if (!pointerDownPos) return;
+    const dist = Math.hypot(e.clientX - pointerDownPos.x, e.clientY - pointerDownPos.y);
+    pointerDownPos = null;
+    if (dist > 6) return; // was a drag, not a click
+
+    pointer.x = (e.clientX / window.innerWidth) * 2 - 1;
+    pointer.y = -(e.clientY / window.innerHeight) * 2 + 1;
+    raycaster.setFromCamera(pointer, camera);
+    const hits = raycaster.intersectObjects(wallMeshes);
+    if (hits.length > 0) {
+      const face = hits[0].object.userData.faceName;
+      const dirMap = {
+        'floor(-y)': [0, -1, 0],
+        'ceil(+y)': [0, 1, 0],
+        'wall(-x)': [-1, 0, 0],
+        'wall(+x)': [1, 0, 0],
+        'wall(-z)': [0, 0, -1],
+        'wall(+z)': [0, 0, 1],
+      };
+      const d = dirMap[face];
+      if (d) setGravity(d[0], d[1], d[2]);
+    }
+  });
+
+  // ============================================================
+  // MOVEMENT (camera-relative, projected onto current "floor" plane)
+  // ============================================================
+  const keys = {};
+  window.addEventListener('keydown', (e) => keys[e.key.toLowerCase()] = true);
+  window.addEventListener('keyup', (e) => keys[e.key.toLowerCase()] = false);
+
+  const MOVE_FORCE = 14;
+
+  function applyMovement() {
+    const camDir = new THREE.Vector3();
+    camera.getWorldDirection(camDir);
+
+    // "up" is opposite gravity
+    const up = new THREE.Vector3(-currentGravityDir.x, -currentGravityDir.y, -currentGravityDir.z).normalize();
+
+    // Project camera forward onto plane perpendicular to "up" to get a valid forward-on-floor vector
+    let forward = camDir.clone().sub(up.clone().multiplyScalar(camDir.dot(up)));
+    if (forward.lengthSq() < 0.0001) {
+      // camera looking straight along gravity axis — fallback
+      forward = new THREE.Vector3(0, 0, -1).sub(up.clone().multiplyScalar(new THREE.Vector3(0,0,-1).dot(up)));
+    }
+    forward.normalize();
+
+    const right = new THREE.Vector3().crossVectors(forward, up).normalize();
+
+    let moveVec = new THREE.Vector3();
+    if (keys['w']) moveVec.add(forward);
+    if (keys['s']) moveVec.sub(forward);
+    if (keys['d']) moveVec.add(right);
+    if (keys['a']) moveVec.sub(right);
+
+    if (moveVec.lengthSq() > 0) {
+      moveVec.normalize().multiplyScalar(MOVE_FORCE);
+      playerBody.applyForce(new CANNON.Vec3(moveVec.x, moveVec.y, moveVec.z), playerBody.position);
+    }
+
+    // simple jump: space applies impulse along "up"
+    if (keys[' ']) {
+      // only allow jump if roughly stationary relative to gravity (cheap ground check via velocity along up)
+      const velAlongUp = playerBody.velocity.x * up.x + playerBody.velocity.y * up.y + playerBody.velocity.z * up.z;
+      if (Math.abs(velAlongUp) < 0.5 && jumpCooldown <= 0) {
+        playerBody.velocity.x += up.x * 7;
+        playerBody.velocity.y += up.y * 7;
+        playerBody.velocity.z += up.z * 7;
+        jumpCooldown = 0.4;
+      }
+    }
+  }
+
+  let jumpCooldown = 0;
+
+  // ============================================================
+  // RESET
+  // ============================================================
+  document.getElementById('reset-btn').addEventListener('click', () => {
+    playerBody.position.set(0, 3, 0);
+    playerBody.velocity.set(0, 0, 0);
+    playerBody.angularVelocity.set(0, 0, 0);
+    playerBody.quaternion.set(0, 0, 0, 1);
+    setGravity(0, -1, 0);
+  });
+
+  // Fall-out-of-room safety net: if player somehow escapes bounds, recenter
+  function safetyCheck() {
+    const p = playerBody.position;
+    const bound = half + 5;
+    if (Math.abs(p.x) > bound || Math.abs(p.y) > bound || Math.abs(p.z) > bound) {
+      playerBody.position.set(0, 3, 0);
+      playerBody.velocity.set(0, 0, 0);
+    }
+  }
+
+  // ============================================================
+  // RESIZE
+  // ============================================================
+  window.addEventListener('resize', () => {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+  });
+
+  // ============================================================
+  // MAIN LOOP
+  // ============================================================
+  const clock = new THREE.Clock();
+  const FIXED_STEP = 1 / 60;
+
+  function animate() {
+    requestAnimationFrame(animate);
+    const dt = Math.min(clock.getDelta(), 0.1);
+
+    if (jumpCooldown > 0) jumpCooldown -= dt;
+
+    applyMovement();
+    world.step(FIXED_STEP, dt, 5);
+    safetyCheck();
+
+    playerMesh.position.copy(playerBody.position);
+    playerMesh.quaternion.copy(playerBody.quaternion);
+    playerGlow.position.copy(playerBody.position);
+
+    renderer.render(scene, camera);
+  }
+
+  setGravity(0, -1, 0);
+  animate();
+
+})();
+}); // end cannon-ready listener
+</script>
+</body>
+</html>
